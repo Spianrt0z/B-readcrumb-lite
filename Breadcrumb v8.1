@@ -1,0 +1,914 @@
+-- breadcrumb v8.1 — bug fixes: slider drag, speed toggle, noclip restore, hitbox cleanup
+-- Toggle menu: RIGHT SHIFT
+
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local UIS         = game:GetService("UserInputService")
+local Camera      = workspace.CurrentCamera
+local LP          = Players.LocalPlayer
+
+local S = {
+    esp  = { on=true, box=true, name=true, tracer=true, dist=true, team=true, max=2000 },
+    aim  = { on=false, fov=120, smooth=4, bone="Head", team=true, dead=true, ff=true, hold="MouseButton2" },
+    move = { speed_on=false, speed=60, jump_on=false, jump=100, inf_jump=false, fly=false, fly_speed=80, noclip=false },
+    rage = { hitbox=false, hitbox_size=3 },
+}
+
+local BINDS = {
+    toggle_menu   = Enum.KeyCode.RightShift,
+    esp_toggle    = nil,
+    aim_toggle    = nil,
+    fly_toggle    = nil,
+    noclip_toggle = nil,
+    speed_toggle  = nil,
+    hitbox_toggle = nil,
+    panic         = Enum.KeyCode.End,
+}
+
+local ACTIONS = {
+    esp_toggle    = function() S.esp.on = not S.esp.on end,
+    aim_toggle    = function() S.aim.on = not S.aim.on end,
+    fly_toggle    = function() S.move.fly = not S.move.fly end,
+    noclip_toggle = function() S.move.noclip = not S.move.noclip end,
+    speed_toggle  = function() S.move.speed_on = not S.move.speed_on end,
+    hitbox_toggle = function() S.rage.hitbox = not S.rage.hitbox end,
+    panic         = function()
+        S.esp.on=false; S.aim.on=false; S.move.fly=false
+        S.move.noclip=false; S.move.speed_on=false; S.rage.hitbox=false
+        print("[breadcrumb] PANIC — all cheats off")
+    end,
+}
+
+local _speed_was_on = false
+local _jump_was_on  = false
+local _noclip_parts = {}
+local _any_slider_dragging = false
+
+local function is_friendly(plr)
+    if plr == LP then return true end
+    if S.aim.team and LP.Team and plr.Team and plr.Team == LP.Team then return true end
+    return false
+end
+local function is_dead(plr)
+    if not S.aim.dead then return false end
+    local ch = plr.Character
+    if not ch then return true end
+    local hum = ch:FindFirstChildOfClass("Humanoid")
+    return hum == nil or hum.Health <= 0
+end
+local function has_ff(plr)
+    if not S.aim.ff then return false end
+    local ch = plr.Character
+    if not ch then return false end
+    return ch:FindFirstChildOfClass("ForceField") ~= nil
+end
+local function targetable(plr)
+    if plr == LP then return false end
+    if is_friendly(plr) then return false end
+    if is_dead(plr) then return false end
+    if has_ff(plr) then return false end
+    return true
+end
+
+local D = Drawing
+local V2 = Vector2.new
+local function mk(t)
+    if not D then return nil end
+    local ok, o = pcall(D.new, t)
+    if not ok or not o then return nil end
+    o.Visible = false
+    return o
+end
+local function sset(o,k,v) if o then pcall(function() o[k]=v end) end end
+
+local ACCENT   = Color3.fromRGB(90, 200, 255)
+local ACCENT2  = Color3.fromRGB(160, 120, 255)
+local BG       = Color3.fromRGB(16, 18, 24)
+local CARD     = Color3.fromRGB(28, 32, 42)
+local CARD_HOV = Color3.fromRGB(38, 44, 58)
+local TXT      = Color3.fromRGB(220, 230, 245)
+local TXT_DIM  = Color3.fromRGB(140, 155, 180)
+
+local function round(p,r)
+    local u = Instance.new("UICorner", p); u.CornerRadius = UDim.new(0, r); return u
+end
+local function grad(p, c1, c2, rot)
+    local g = Instance.new("UIGradient", p)
+    g.Color = ColorSequence.new{
+        ColorSequenceKeypoint.new(0, c1),
+        ColorSequenceKeypoint.new(1, c2)
+    }
+    g.Rotation = rot or 45
+    return g
+end
+local function strk(p, c, t)
+    local s = Instance.new("UIStroke", p)
+    s.Color = c or ACCENT; s.Thickness = t or 1; return s
+end
+
+local pg = LP:WaitForChild("PlayerGui")
+local gui = Instance.new("ScreenGui")
+gui.Name = "bc_v8"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 999
+gui.Parent = pg
+
+local fab = Instance.new("TextButton")
+fab.Size = UDim2.new(0, 42, 0, 42)
+fab.Position = UDim2.new(0, 20, 0.5, -21)
+fab.BackgroundColor3 = BG
+fab.BorderSizePixel = 0
+fab.Font = Enum.Font.GothamBold
+fab.Text = "B"
+fab.TextSize = 18
+fab.TextColor3 = Color3.fromRGB(255, 255, 255)
+fab.Parent = gui
+round(fab, 21)
+grad(fab, ACCENT, ACCENT2, 45)
+strk(fab, Color3.fromRGB(255,255,255), 1)
+
+local win = Instance.new("Frame")
+win.Size = UDim2.new(0, 480, 0, 560)
+win.Position = UDim2.new(0.5, -240, 0.5, -280)
+win.BackgroundColor3 = BG
+win.BorderSizePixel = 0
+win.Active = true
+win.Draggable = true
+win.Visible = false
+win.Parent = gui
+round(win, 14)
+local outerGlow = Instance.new("UIStroke", win)
+outerGlow.Color = ACCENT
+outerGlow.Thickness = 2
+outerGlow.Transparency = 0.5
+
+local hdr = Instance.new("Frame")
+hdr.Size = UDim2.new(1, 0, 0, 56)
+hdr.BackgroundColor3 = BG
+hdr.BorderSizePixel = 0
+hdr.Parent = win
+round(hdr, 14)
+local hdrFix = Instance.new("Frame")
+hdrFix.Size = UDim2.new(1, 0, 0, 14)
+hdrFix.Position = UDim2.new(0, 0, 1, -14)
+hdrFix.BackgroundColor3 = BG
+hdrFix.BorderSizePixel = 0
+hdrFix.Parent = hdr
+grad(hdr, ACCENT, ACCENT2, 45)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -80, 0, 24)
+title.Position = UDim2.new(0, 20, 0, 10)
+title.BackgroundTransparency = 1
+title.Font = Enum.Font.GothamBold
+title.Text = "breadcrumb"
+title.TextSize = 18
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = hdr
+
+local ver = Instance.new("TextLabel")
+ver.Size = UDim2.new(0, 200, 0, 14)
+ver.Position = UDim2.new(0, 20, 0, 34)
+ver.BackgroundTransparency = 1
+ver.Font = Enum.Font.Gotham
+ver.Text = "v8.1 • right shift"
+ver.TextSize = 10
+ver.TextColor3 = Color3.fromRGB(220, 230, 245)
+ver.TextXAlignment = Enum.TextXAlignment.Left
+ver.Parent = hdr
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 30, 0, 30)
+closeBtn.Position = UDim2.new(1, -42, 0, 13)
+closeBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 80)
+closeBtn.BorderSizePixel = 0
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.Text = "×"
+closeBtn.TextSize = 18
+closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeBtn.Parent = hdr
+round(closeBtn, 8)
+
+local tabsBar = Instance.new("Frame")
+tabsBar.Size = UDim2.new(1, -24, 0, 38)
+tabsBar.Position = UDim2.new(0, 12, 0, 64)
+tabsBar.BackgroundColor3 = Color3.fromRGB(22, 26, 34)
+tabsBar.BorderSizePixel = 0
+tabsBar.Parent = win
+round(tabsBar, 10)
+
+local tabsLayout = Instance.new("UIListLayout", tabsBar)
+tabsLayout.FillDirection = Enum.FillDirection.Horizontal
+tabsLayout.Padding = UDim.new(0, 4)
+tabsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+tabsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -24, 1, -110)
+content.Position = UDim2.new(0, 12, 0, 106)
+content.BackgroundTransparency = 1
+content.Parent = win
+
+local pages = {}
+local function makePage(name)
+    local page = Instance.new("ScrollingFrame")
+    page.Name = name
+    page.Size = UDim2.new(1, 0, 1, 0)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel = 0
+    page.ScrollBarThickness = 4
+    page.ScrollBarImageColor3 = ACCENT
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    page.CanvasSize = UDim2.new(0, 0, 0, 0)
+    page.Visible = false
+    page.Parent = content
+    local l = Instance.new("UIListLayout", page)
+    l.Padding = UDim.new(0, 6)
+    l.SortOrder = Enum.SortOrder.LayoutOrder
+    pages[name] = page
+    return page
+end
+
+local function makeTab(name)
+    local b = Instance.new("TextButton")
+    b.Name = name
+    b.Size = UDim2.new(0, 72, 0, 28)
+    b.BackgroundColor3 = Color3.fromRGB(22, 26, 34)
+    b.BorderSizePixel = 0
+    b.Font = Enum.Font.GothamBold
+    b.Text = name
+    b.TextSize = 11
+    b.TextColor3 = TXT_DIM
+    b.Parent = tabsBar
+    round(b, 6)
+    b.MouseButton1Click:Connect(function()
+        for n, p in pairs(pages) do p.Visible = (n == name) end
+        for _, other in ipairs(tabsBar:GetChildren()) do
+            if other:IsA("TextButton") then
+                other.TextColor3 = (other.Name == name) and Color3.fromRGB(255,255,255) or TXT_DIM
+                other.BackgroundColor3 = (other.Name == name) and Color3.fromRGB(45, 52, 68) or Color3.fromRGB(22, 26, 34)
+            end
+        end
+    end)
+    return b
+end
+
+local function section(page, text)
+    local s = Instance.new("TextLabel")
+    s.Size = UDim2.new(1, 0, 0, 22)
+    s.BackgroundTransparency = 1
+    s.Font = Enum.Font.GothamBold
+    s.Text = string.upper(text)
+    s.TextSize = 10
+    s.TextColor3 = ACCENT
+    s.TextXAlignment = Enum.TextXAlignment.Left
+    s.Parent = page
+    return s
+end
+
+local function checkbox(page, text, get, set_)
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, 0, 0, 34)
+    row.BackgroundColor3 = CARD
+    row.BorderSizePixel = 0
+    row.AutoButtonColor = false
+    row.Text = ""
+    row.Parent = page
+    round(row, 8)
+    strk(row, Color3.fromRGB(45, 52, 68), 1)
+
+    local t = Instance.new("TextLabel")
+    t.Size = UDim2.new(1, -50, 1, 0)
+    t.Position = UDim2.new(0, 14, 0, 0)
+    t.BackgroundTransparency = 1
+    t.Font = Enum.Font.Gotham
+    t.Text = text
+    t.TextSize = 13
+    t.TextColor3 = TXT
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.Parent = row
+
+    local box = Instance.new("Frame")
+    box.Size = UDim2.new(0, 18, 0, 18)
+    box.Position = UDim2.new(1, -32, 0.5, -9)
+    box.BackgroundColor3 = get() and ACCENT or Color3.fromRGB(50, 56, 70)
+    box.BorderSizePixel = 0
+    box.Parent = row
+    round(box, 4)
+
+    local tick = Instance.new("TextLabel")
+    tick.Size = UDim2.new(1, 0, 1, 0)
+    tick.BackgroundTransparency = 1
+    tick.Font = Enum.Font.GothamBold
+    tick.Text = "✓"
+    tick.TextSize = 12
+    tick.TextColor3 = Color3.fromRGB(255,255,255)
+    tick.TextTransparency = get() and 0 or 1
+    tick.Parent = box
+
+    row.MouseEnter:Connect(function() row.BackgroundColor3 = CARD_HOV end)
+    row.MouseLeave:Connect(function() row.BackgroundColor3 = CARD end)
+    row.MouseButton1Click:Connect(function()
+        local v = not get()
+        set_(v)
+        box.BackgroundColor3 = v and ACCENT or Color3.fromRGB(50, 56, 70)
+        tick.TextTransparency = v and 0 or 1
+    end)
+end
+
+local function slider(page, text, min, max, step, get, set_)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 46)
+    row.BackgroundColor3 = CARD
+    row.BorderSizePixel = 0
+    row.Parent = page
+    round(row, 8)
+    strk(row, Color3.fromRGB(45, 52, 68), 1)
+
+    local t = Instance.new("TextLabel")
+    t.Size = UDim2.new(1, -100, 0, 18)
+    t.Position = UDim2.new(0, 14, 0, 4)
+    t.BackgroundTransparency = 1
+    t.Font = Enum.Font.Gotham
+    t.Text = text
+    t.TextSize = 12
+    t.TextColor3 = TXT
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.Parent = row
+
+    local val = Instance.new("TextLabel")
+    val.Size = UDim2.new(0, 70, 0, 18)
+    val.Position = UDim2.new(1, -84, 0, 4)
+    val.BackgroundTransparency = 1
+    val.Font = Enum.Font.GothamBold
+    val.TextSize = 12
+    val.TextColor3 = ACCENT
+    val.TextXAlignment = Enum.TextXAlignment.Right
+    val.Text = tostring(get())
+    val.Parent = row
+
+    local bar = Instance.new("Frame")
+    bar.Size = UDim2.new(1, -28, 0, 6)
+    bar.Position = UDim2.new(0, 14, 0, 30)
+    bar.BackgroundColor3 = Color3.fromRGB(40, 46, 60)
+    bar.BorderSizePixel = 0
+    bar.Parent = row
+    round(bar, 3)
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.BackgroundColor3 = ACCENT
+    fill.BorderSizePixel = 0
+    fill.Parent = bar
+    round(fill, 3)
+    grad(fill, ACCENT, ACCENT2, 0)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 12, 0, 12)
+    knob.AnchorPoint = Vector2.new(0.5, 0.5)
+    knob.Position = UDim2.new(0, 0, 0.5, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    knob.ZIndex = 3
+    knob.Parent = bar
+    round(knob, 6)
+
+    local dragging = false
+    local function apply(x)
+        local rel = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+        local v = min + (max - min) * rel
+        v = math.floor(v / step + 0.5) * step
+        fill.Size = UDim2.new(rel, 0, 1, 0)
+        knob.Position = UDim2.new(rel, 0, 0.5, 0)
+        val.Text = tostring(v)
+        set_(v)
+    end
+
+    bar.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            _any_slider_dragging = true
+            win.Draggable = false
+            apply(i.Position.X)
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+            apply(i.Position.X)
+        end
+    end)
+    UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 and dragging then
+            dragging = false
+            _any_slider_dragging = false
+            win.Draggable = true
+        end
+    end)
+
+    local cur = math.clamp((get() - min) / (max - min), 0, 1)
+    fill.Size = UDim2.new(cur, 0, 1, 0)
+    knob.Position = UDim2.new(cur, 0, 0.5, 0)
+end
+
+local function combo(page, text, opts, get, set_)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 34)
+    row.BackgroundColor3 = CARD
+    row.BorderSizePixel = 0
+    row.Parent = page
+    round(row, 8)
+    strk(row, Color3.fromRGB(45, 52, 68), 1)
+
+    local t = Instance.new("TextLabel")
+    t.Size = UDim2.new(1, -130, 1, 0)
+    t.Position = UDim2.new(0, 14, 0, 0)
+    t.BackgroundTransparency = 1
+    t.Font = Enum.Font.Gotham
+    t.Text = text
+    t.TextSize = 13
+    t.TextColor3 = TXT
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.Parent = row
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 100, 0, 24)
+    btn.Position = UDim2.new(1, -112, 0.5, -12)
+    btn.BackgroundColor3 = Color3.fromRGB(45, 52, 68)
+    btn.BorderSizePixel = 0
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.TextColor3 = ACCENT
+    btn.Text = tostring(get())
+    btn.Parent = row
+    round(btn, 6)
+    btn.MouseButton1Click:Connect(function()
+        local cur = get(); local idx = 1
+        for i, o in ipairs(opts) do if o == cur then idx = i break end end
+        idx = (idx % #opts) + 1
+        set_(opts[idx]); btn.Text = tostring(opts[idx])
+    end)
+end
+
+local function keybindRow(page, label, action)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 34)
+    row.BackgroundColor3 = CARD
+    row.BorderSizePixel = 0
+    row.Parent = page
+    round(row, 8)
+    strk(row, Color3.fromRGB(45, 52, 68), 1)
+
+    local t = Instance.new("TextLabel")
+    t.Size = UDim2.new(1, -140, 1, 0)
+    t.Position = UDim2.new(0, 14, 0, 0)
+    t.BackgroundTransparency = 1
+    t.Font = Enum.Font.Gotham
+    t.Text = label
+    t.TextSize = 13
+    t.TextColor3 = TXT
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.Parent = row
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 110, 0, 24)
+    btn.Position = UDim2.new(1, -122, 0.5, -12)
+    btn.BackgroundColor3 = Color3.fromRGB(45, 52, 68)
+    btn.BorderSizePixel = 0
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 11
+    btn.TextColor3 = ACCENT
+    btn.Text = BINDS[action] and BINDS[action].Name or "unbound"
+    btn.Parent = row
+    round(btn, 6)
+
+    local listening = false
+    local conn
+    btn.MouseButton1Click:Connect(function()
+        if listening then
+            listening = false
+            if conn then conn:Disconnect(); conn = nil end
+            btn.Text = BINDS[action] and BINDS[action].Name or "unbound"
+            btn.TextColor3 = ACCENT
+            return
+        end
+        listening = true
+        btn.Text = "press a key..."
+        btn.TextColor3 = Color3.fromRGB(255, 200, 100)
+        conn = UIS.InputBegan:Connect(function(input, gp)
+            if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+            if input.KeyCode == Enum.KeyCode.Escape then
+                BINDS[action] = nil
+            else
+                BINDS[action] = input.KeyCode
+            end
+            listening = false
+            if conn then conn:Disconnect(); conn = nil end
+            btn.Text = BINDS[action] and BINDS[action].Name or "unbound"
+            btn.TextColor3 = ACCENT
+        end)
+    end)
+end
+
+makeTab("Visuals");  local pV = makePage("Visuals")
+makeTab("Aimbot");   local pA = makePage("Aimbot")
+makeTab("Movement"); local pM = makePage("Movement")
+makeTab("Rage");     local pR = makePage("Rage")
+makeTab("Binds");    local pB = makePage("Binds")
+makeTab("Config");   local pC = makePage("Config")
+pages["Visuals"].Visible = true
+
+section(pV, "ESP")
+checkbox(pV, "Master", function() return S.esp.on end, function(v) S.esp.on = v end)
+checkbox(pV, "Boxes",  function() return S.esp.box end, function(v) S.esp.box = v end)
+checkbox(pV, "Names",  function() return S.esp.name end, function(v) S.esp.name = v end)
+checkbox(pV, "Tracers",function() return S.esp.tracer end, function(v) S.esp.tracer = v end)
+checkbox(pV, "Distance",function() return S.esp.dist end, function(v) S.esp.dist = v end)
+checkbox(pV, "Team check",function() return S.esp.team end, function(v) S.esp.team = v end)
+slider(pV, "Max distance", 100, 5000, 50, function() return S.esp.max end, function(v) S.esp.max = v end)
+
+section(pA, "Targeting")
+checkbox(pA, "Enabled", function() return S.aim.on end, function(v) S.aim.on = v end)
+checkbox(pA, "Ignore teammates", function() return S.aim.team end, function(v) S.aim.team = v end)
+checkbox(pA, "Ignore dead", function() return S.aim.dead end, function(v) S.aim.dead = v end)
+checkbox(pA, "Ignore ForceField", function() return S.aim.ff end, function(v) S.aim.ff = v end)
+section(pA, "Behavior")
+slider(pA, "FOV", 10, 360, 5, function() return S.aim.fov end, function(v) S.aim.fov = v end)
+slider(pA, "Smoothing", 1, 20, 1, function() return S.aim.smooth end, function(v) S.aim.smooth = v end)
+combo(pA, "Bone", {"Head","UpperTorso","Torso","HumanoidRootPart"}, function() return S.aim.bone end, function(v) S.aim.bone = v end)
+combo(pA, "Hold key", {"MouseButton2","MouseButton1","LeftAlt","LeftShift","Q"}, function() return S.aim.hold end, function(v) S.aim.hold = v end)
+
+section(pM, "Speed & Jump")
+checkbox(pM, "Speed hack", function() return S.move.speed_on end, function(v) S.move.speed_on = v end)
+slider(pM, "Walk speed", 16, 300, 1, function() return S.move.speed end, function(v) S.move.speed = v end)
+checkbox(pM, "Jump power", function() return S.move.jump_on end, function(v) S.move.jump_on = v end)
+slider(pM, "Jump power", 50, 500, 5, function() return S.move.jump end, function(v) S.move.jump = v end)
+checkbox(pM, "Infinite jump", function() return S.move.inf_jump end, function(v) S.move.inf_jump = v end)
+section(pM, "Flight & Clip")
+checkbox(pM, "Fly", function() return S.move.fly end, function(v) S.move.fly = v end)
+slider(pM, "Fly speed", 20, 300, 5, function() return S.move.fly_speed end, function(v) S.move.fly_speed = v end)
+checkbox(pM, "Noclip", function() return S.move.noclip end, function(v) S.move.noclip = v end)
+
+section(pR, "Hitbox")
+checkbox(pR, "Hitbox expander", function() return S.rage.hitbox end, function(v) S.rage.hitbox = v end)
+slider(pR, "Hitbox size x10", 10, 100, 5, function() return math.floor(S.rage.hitbox_size * 10) end, function(v) S.rage.hitbox_size = v / 10 end)
+
+section(pB, "Menu")
+keybindRow(pB, "Toggle menu", "toggle_menu")
+section(pB, "Cheat toggles")
+keybindRow(pB, "ESP on/off", "esp_toggle")
+keybindRow(pB, "Aimbot on/off", "aim_toggle")
+keybindRow(pB, "Speed on/off", "speed_toggle")
+keybindRow(pB, "Fly on/off", "fly_toggle")
+keybindRow(pB, "Noclip on/off", "noclip_toggle")
+keybindRow(pB, "Hitbox on/off", "hitbox_toggle")
+section(pB, "Panic")
+keybindRow(pB, "Disable everything", "panic")
+
+section(pC, "Actions")
+local function actionButton(label, cb)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, 0, 0, 36)
+    b.BackgroundColor3 = CARD
+    b.BorderSizePixel = 0
+    b.Font = Enum.Font.GothamBold
+    b.Text = label
+    b.TextSize = 12
+    b.TextColor3 = Color3.fromRGB(255,255,255)
+    b.AutoButtonColor = false
+    b.Parent = pC
+    round(b, 8)
+    grad(b, ACCENT, ACCENT2, 45)
+    b.MouseButton1Click:Connect(cb)
+end
+actionButton("Reset all settings", function()
+    S.esp.on=true; S.esp.box=true; S.esp.name=true; S.esp.tracer=true; S.esp.dist=true; S.esp.team=true; S.esp.max=2000
+    S.aim.on=false; S.aim.fov=120; S.aim.smooth=4; S.aim.bone="Head"
+    S.move.speed_on=false; S.move.speed=60; S.move.jump_on=false; S.move.jump=100
+    S.move.inf_jump=false; S.move.fly=false; S.move.fly_speed=80; S.move.noclip=false
+    S.rage.hitbox=false; S.rage.hitbox_size=3
+    print("[breadcrumb] settings reset")
+end)
+actionButton("Re-apply character", function()
+    local ch = LP.Character
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    if hum then hum.WalkSpeed = 16; hum.JumpPower = 50 end
+end)
+actionButton("Unload script", function() gui:Destroy() end)
+
+section(pC, "Info")
+local info = Instance.new("TextLabel")
+info.Size = UDim2.new(1, 0, 0, 90)
+info.BackgroundColor3 = CARD
+info.BorderSizePixel = 0
+info.Font = Enum.Font.Gotham
+info.Text = "breadcrumb v8.1\nToggle: Right Shift\nPanic: End (rebindable)"
+info.TextSize = 11
+info.TextColor3 = TXT_DIM
+info.TextYAlignment = Enum.TextYAlignment.Top
+info.TextWrapped = true
+info.Parent = pC
+round(info, 8)
+local pad = Instance.new("UIPadding", info)
+pad.PaddingTop = UDim.new(0, 10)
+pad.PaddingLeft = UDim.new(0, 12)
+pad.PaddingRight = UDim.new(0, 12)
+
+local draws = {}
+local function get_draws(plr)
+    if draws[plr] then return draws[plr] end
+    local d = { box=mk("Square"), name=mk("Text"), tracer=mk("Line"), dist=mk("Text") }
+    if d.name then sset(d.name, "Size", 14); sset(d.name, "Center", true); sset(d.name, "Outline", true) end
+    if d.dist then sset(d.dist, "Size", 12); sset(d.dist, "Center", true); sset(d.dist, "Outline", true) end
+    draws[plr] = d
+    return d
+end
+local function hide(d) if d then for _, o in pairs(d) do sset(o, "Visible", false) end end end
+
+local function w2s(world)
+    local ok, s, on = pcall(function() return Camera:WorldToScreenPoint(world) end)
+    if not ok or not on then return nil end
+    return V2(s.X, s.Y)
+end
+
+local function update_esp()
+    if not Drawing then return end
+    if not S.esp.on then for _, d in pairs(draws) do hide(d) end return end
+    local vp = Camera.ViewportSize
+    local origin = V2(vp.X * 0.5, vp.Y)
+    local cam_pos = Camera.CFrame.Position
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP then
+            local d = get_draws(plr)
+            local ch = plr.Character
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            local head = ch and ch:FindFirstChild("Head")
+            local friendly = S.esp.team and LP.Team and plr.Team and plr.Team == LP.Team
+            local show = ch and hrp and head and not friendly
+            local dist = 0
+            if show then
+                dist = (hrp.Position - cam_pos).Magnitude
+                if dist > S.esp.max then show = false end
+            end
+            if not show or not d then
+                hide(d)
+            else
+                local top  = w2s(head.Position + Vector3.new(0, head.Size.Y * 0.5, 0))
+                local feet = w2s(hrp.Position - Vector3.new(0, 3, 0))
+                if not top or not feet then
+                    hide(d)
+                else
+                    local h = feet.Y - top.Y
+                    if h < 2 then
+                        hide(d)
+                    else
+                        local w = h * 0.55
+                        if S.esp.box and d.box then
+                            sset(d.box, "Visible", true)
+                            sset(d.box, "Size", V2(w, h))
+                            sset(d.box, "Position", V2(top.X - w * 0.5, top.Y))
+                            sset(d.box, "Color", Color3.fromRGB(180, 210, 255))
+                            sset(d.box, "Thickness", 1)
+                            sset(d.box, "Filled", false)
+                        else
+                            sset(d.box, "Visible", false)
+                        end
+                        if S.esp.name and d.name then
+                            sset(d.name, "Visible", true)
+                            sset(d.name, "Text", plr.Name)
+                            sset(d.name, "Color", Color3.fromRGB(235, 235, 255))
+                            sset(d.name, "Position", V2(top.X, top.Y - 16))
+                        else
+                            sset(d.name, "Visible", false)
+                        end
+                        if S.esp.dist and d.dist then
+                            sset(d.dist, "Visible", true)
+                            sset(d.dist, "Text", ("%d"):format(math.floor(dist)))
+                            sset(d.dist, "Color", Color3.fromRGB(200, 200, 200))
+                            sset(d.dist, "Position", V2(top.X, feet.Y + 4))
+                        else
+                            sset(d.dist, "Visible", false)
+                        end
+                        if S.esp.tracer and d.tracer then
+                            sset(d.tracer, "Visible", true)
+                            sset(d.tracer, "Color", Color3.fromRGB(160, 200, 255))
+                            local ok1 = pcall(function() d.tracer.From = origin end)
+                            if not ok1 then pcall(function() d.tracer.PointA = origin end) end
+                            local ok2 = pcall(function() d.tracer.To = V2(top.X, feet.Y) end)
+                            if not ok2 then pcall(function() d.tracer.PointB = V2(top.X, feet.Y) end) end
+                        else
+                            sset(d.tracer, "Visible", false)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function in_fov(sp, fov)
+    if not sp then return false end
+    local vp = Camera.ViewportSize
+    local c = V2(vp.X * 0.5, vp.Y * 0.5)
+    local off = sp - c
+    return math.deg(math.atan(off.Magnitude / (vp.Y * 0.5))) <= fov
+end
+
+local function hold_check()
+    local h = S.aim.hold
+    if h == "MouseButton1" then return UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) end
+    if h == "MouseButton2" then return UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) end
+    if h == "LeftAlt" then return UIS:IsKeyDown(Enum.KeyCode.LeftAlt) end
+    if h == "LeftShift" then return UIS:IsKeyDown(Enum.KeyCode.LeftShift) end
+    if h == "Q" then return UIS:IsKeyDown(Enum.KeyCode.Q) end
+    return false
+end
+
+local function pick()
+    local best, bd = nil, math.huge
+    local vp = Camera.ViewportSize
+    local c = V2(vp.X * 0.5, vp.Y * 0.5)
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if targetable(plr) then
+            local ch = plr.Character
+            local bone = ch and ch:FindFirstChild(S.aim.bone)
+            if bone then
+                local sp_ = w2s(bone.Position)
+                if sp_ and in_fov(sp_, S.aim.fov) then
+                    local d = (sp_ - c).Magnitude
+                    if d < bd then bd = d; best = { pos = bone.Position } end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function run_aim()
+    if not S.aim.on then return end
+    if not hold_check() then return end
+    local t = pick()
+    if not t then return end
+    local cam = Camera.CFrame
+    local want = CFrame.new(cam.Position, t.pos)
+    Camera.CFrame = cam:Lerp(want, 1 / math.max(S.aim.smooth, 1))
+end
+
+local fly_bv, fly_bg
+local function start_fly()
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    if fly_bv then fly_bv:Destroy() end
+    if fly_bg then fly_bg:Destroy() end
+    fly_bv = Instance.new("BodyVelocity", hrp)
+    fly_bv.Name = "bc_fly"
+    fly_bv.MaxForce = Vector3.new(1e6,1e6,1e6)
+    fly_bv.Velocity = Vector3.zero
+    fly_bg = Instance.new("BodyGyro", hrp)
+    fly_bg.Name = "bc_fly"
+    fly_bg.MaxTorque = Vector3.new(1e6,1e6,1e6)
+    fly_bg.P = 1500; fly_bg.D = 50
+    fly_bg.CFrame = hrp.CFrame
+end
+local function stop_fly()
+    if fly_bv then fly_bv:Destroy() fly_bv = nil end
+    if fly_bg then fly_bg:Destroy() fly_bg = nil end
+end
+
+local last_jump = 0
+local function movement_tick()
+    local ch = LP.Character
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+
+    if hum then
+        if S.move.speed_on then
+            hum.WalkSpeed = S.move.speed
+            _speed_was_on = true
+        elseif _speed_was_on then
+            hum.WalkSpeed = 16
+            _speed_was_on = false
+        end
+        if S.move.jump_on then
+            hum.UseJumpPower = true
+            hum.JumpPower = S.move.jump
+            _jump_was_on = true
+        elseif _jump_was_on then
+            hum.JumpPower = 50
+            _jump_was_on = false
+        end
+    end
+
+    if S.move.inf_jump and hum and hrp then
+        local state = hum:GetState()
+        if state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.Jumping then
+            if UIS:IsKeyDown(Enum.KeyCode.Space) and tick() - last_jump > 0.15 then
+                last_jump = tick()
+                hum:ChangeState(Enum.HumanoidStateType.Jumping)
+                pcall(function() hrp.Velocity = Vector3.new(hrp.Velocity.X, S.move.jump * 0.8, hrp.Velocity.Z) end)
+            end
+        end
+    end
+
+    if S.move.fly then
+        if not fly_bv then start_fly() end
+        if fly_bv and fly_bg and hrp then
+            local cf = Camera.CFrame
+            local mv = Vector3.zero
+            if UIS:IsKeyDown(Enum.KeyCode.W) then mv += cf.LookVector end
+            if UIS:IsKeyDown(Enum.KeyCode.S) then mv -= cf.LookVector end
+            if UIS:IsKeyDown(Enum.KeyCode.A) then mv -= cf.RightVector end
+            if UIS:IsKeyDown(Enum.KeyCode.D) then mv += cf.RightVector end
+            if UIS:IsKeyDown(Enum.KeyCode.Space) then mv += Vector3.new(0,1,0) end
+            if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then mv -= Vector3.new(0,1,0) end
+            if mv.Magnitude > 0 then mv = mv.Unit * S.move.fly_speed end
+            fly_bv.Velocity = mv
+            fly_bg.CFrame = CFrame.new(Vector3.zero) * cf.Rotation
+        end
+    else
+        if fly_bv then stop_fly() end
+    end
+
+    if S.move.noclip and ch then
+        for _, p in ipairs(ch:GetDescendants()) do
+            if p:IsA("BasePart") and p.CanCollide then
+                p.CanCollide = false
+                _noclip_parts[p] = true
+            end
+        end
+    elseif next(_noclip_parts) then
+        for part, _ in pairs(_noclip_parts) do
+            if part and part.Parent and part:IsA("BasePart") then
+                part.CanCollide = true
+            end
+        end
+        _noclip_parts = {}
+    end
+end
+
+local orig_sizes = {}
+local function hitbox_tick()
+    for part in pairs(orig_sizes) do
+        if not part or not part.Parent then orig_sizes[part] = nil end
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP then
+            local ch = plr.Character
+            if ch then
+                for _, part in ipairs(ch:GetDescendants()) do
+                    if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                        if S.rage.hitbox then
+                            if not orig_sizes[part] then orig_sizes[part] = part.Size end
+                            part.Size = orig_sizes[part] * S.rage.hitbox_size
+                            part.Transparency = 0.5
+                        elseif orig_sizes[part] then
+                            pcall(function()
+                                part.Size = orig_sizes[part]
+                                part.Transparency = 0
+                            end)
+                            orig_sizes[part] = nil
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+RunService.RenderStepped:Connect(function()
+    pcall(update_esp)
+    pcall(run_aim)
+    pcall(movement_tick)
+    pcall(hitbox_tick)
+end)
+
+LP.CharacterAdded:Connect(function()
+    stop_fly()
+    orig_sizes = {}
+    _noclip_parts = {}
+    _speed_was_on = false
+    _jump_was_on = false
+end)
+
+local function toggleMenu()
+    win.Visible = not win.Visible
+end
+
+fab.MouseButton1Click:Connect(toggleMenu)
+closeBtn.MouseButton1Click:Connect(function() win.Visible = false end)
+
+UIS.InputBegan:Connect(function(input, gp)
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    for action, key in pairs(BINDS) do
+        if key and input.KeyCode == key then
+            if action == "toggle_menu" then
+                toggleMenu()
+            elseif ACTIONS[action] then
+                ACTIONS[action]()
+            end
+        end
+    end
+end)
+
+print("[breadcrumb v8.1] loaded — RIGHT SHIFT toggles menu, END panics")
